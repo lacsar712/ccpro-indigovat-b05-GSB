@@ -240,10 +240,60 @@
     .lot-list li {
       display: flex;
       justify-content: space-between;
+      align-items: center;
       gap: 0.5rem;
       padding: 0.4rem 0;
       border-bottom: 1px dashed #c5d8d6;
       color: #35505a;
+      flex-wrap: wrap;
+    }
+    .lot-right {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.45rem;
+    }
+    .lot-edit-btn {
+      width: auto;
+      margin: 0;
+      padding: 0.1rem 0.5rem;
+      font-size: 0.75rem;
+      line-height: 1.4;
+      background: transparent;
+      border: 1px solid #9ab6bf;
+      color: var(--indigo-mid);
+    }
+    .lot-edit-btn:hover { background: rgba(31, 77, 107, 0.08); }
+    .lot-edit-form {
+      flex-basis: 100%;
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr)) auto;
+      gap: 0.5rem;
+      align-items: end;
+      padding: 0.55rem 0.5rem;
+      margin-top: 0.3rem;
+      background: rgba(31, 77, 107, 0.05);
+      border: 1px solid #c5d8d6;
+      border-radius: 10px;
+    }
+    .lot-edit-form label { margin: 0; font-size: 0.76rem; }
+    .lot-edit-form input { padding: 0.3rem 0.45rem; font-size: 0.82rem; }
+    .lot-edit-form button[type="submit"] {
+      padding: 0.32rem 0.7rem;
+      font-size: 0.8rem;
+    }
+    .lot-edit-cancel {
+      width: auto;
+      margin: 0 0 0 0.4rem;
+      padding: 0.32rem 0.7rem;
+      font-size: 0.8rem;
+      background: transparent;
+      border: 1px solid #9ab6bf;
+      color: #4a6670;
+    }
+    .lot-edit-actions { white-space: nowrap; }
+    .dip-rule { margin-top: -0.5rem; font-size: 0.82rem; color: #5a7580; }
+    @media (max-width: 560px) {
+      .lot-edit-form { grid-template-columns: 1fr; }
     }
     .empty-bay {
       color: rgba(216, 235, 232, 0.75);

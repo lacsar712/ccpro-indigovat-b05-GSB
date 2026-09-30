@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Optional
 import json
@@ -7,12 +7,13 @@ from fastapi import APIRouter, Depends, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from jinja2.utils import markupsafe
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload
 
 from app.auth import get_current_user
 from app.db import get_db
 from app.models import DipLot, Vat, Workshop
-from app.services.vat_rules import VatRuleError, validate_vat_status_change
+from app.services.vat_rules import VatRuleError, validate_lot_upsert, validate_vat_status_change
 
 router = APIRouter()
 templates = Jinja2Templates(directory="app/templates")
@@ -78,6 +79,8 @@ def _vat_payload(vat: Vat) -> dict:
             {
                 "id": l.id,
                 "dippedAt": l.dippedAt.strftime("%Y-%m-%d %H:%M"),
+                # datetime-local 编辑框需要 YYYY-MM-DDTHH:MM
+                "dippedAtInput": l.dippedAt.strftime("%Y-%m-%dT%H:%M"),
                 "clothMeters": float(l.clothMeters),
                 "redoxMv": float(l.redoxMv) if l.redoxMv is not None else None,
             }
@@ -166,6 +169,52 @@ async def bay_vat_status(
     )
 
 
+def _load_vat(db: Session, pk: int) -> Optional[Vat]:
+    return (
+        db.query(Vat)
+        .options(joinedload(Vat.workshop), joinedload(Vat.lots))
+        .filter(Vat.id == pk)
+        .first()
+    )
+
+
+def _parse_lot_fields(dipped_at: str, cloth_meters: str, redox_mv: str):
+    """解析浸染表单并把时刻统一归一化为 UTC 带时区时间。
+
+    datetime-local 提交的是无时区的本地墙钟时间；统一按 UTC 落库，
+    保证与种子时刻及同缸各笔之间的先后比较口径一致。
+    """
+    try:
+        dt = datetime.fromisoformat(dipped_at)
+    except ValueError as exc:
+        raise ValueError(f"浸染时间格式无效：{exc}") from exc
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    else:
+        dt = dt.astimezone(timezone.utc)
+    meters = Decimal(cloth_meters)
+    redox = Decimal(redox_mv) if redox_mv.strip() else None
+    return dt, meters, redox
+
+
+def _lot_form_failure(
+    request: Request,
+    db: Session,
+    user,
+    pk: int,
+    ws: Optional[int],
+    error: str,
+):
+    """任何拒绝路径都先回滚（不留半截记录），再以 400 重开还原台。"""
+    db.rollback()
+    return render(
+        request,
+        "bay.html",
+        _bay_context(request, db, user, ws, pk, error),
+        status_code=400,
+    )
+
+
 @router.post("/bay/vats/{pk}/lots", response_class=HTMLResponse)
 async def bay_log_lot(
     pk: int,
@@ -179,30 +228,82 @@ async def bay_log_lot(
     user = _need_login(request, db)
     if not user:
         return RedirectResponse("/login", status_code=303)
-    item = db.get(Vat, pk)
+    item = _load_vat(db, pk)
     ws = int(workshop) if workshop.strip() else None
     if not item:
         return RedirectResponse("/", status_code=303)
-    error = None
     try:
-        lot = DipLot(
-            vat_id=pk,
-            dippedAt=datetime.fromisoformat(dippedAt),
-            clothMeters=Decimal(clothMeters),
-            redoxMv=Decimal(redoxMv) if redoxMv.strip() else None,
-        )
+        dt, meters, redox = _parse_lot_fields(dippedAt, clothMeters, redoxMv)
+        # 与更新共用同一套时刻规则（闲置拒记 / 严格递增 / 时刻唯一）
+        validate_lot_upsert(item, dt, db, existing_lot=None)
+        # 规则全部通过后才把新笔加入会话，失败时会话里不存在半截对象
+        lot = DipLot(vat_id=pk, dippedAt=dt, clothMeters=meters, redoxMv=redox)
         db.add(lot)
         db.commit()
         return RedirectResponse(f"/?vat={pk}" + (f"&workshop={ws}" if ws else ""), status_code=303)
     except (ValueError, InvalidOperation) as exc:
-        error = f"浸染记录无效：{exc}"
-        db.rollback()
-    return render(
-        request,
-        "bay.html",
-        _bay_context(request, db, user, ws, pk, error),
-        status_code=400,
+        return _lot_form_failure(request, db, user, pk, ws, f"浸染记录无效：{exc}")
+    except VatRuleError as exc:
+        return _lot_form_failure(request, db, user, pk, ws, exc.message)
+    except IntegrityError:
+        # 唯一约束兜底：并发/连交两笔相同时刻，只允许一笔，另一笔完整回滚
+        return _lot_form_failure(
+            request,
+            db,
+            user,
+            pk,
+            ws,
+            "该缸已有相同时刻的浸染笔：同缸时刻须严格递增、互不相等，本次登记已取消。",
+        )
+
+
+@router.post("/bay/vats/{pk}/lots/{lot_id}/edit", response_class=HTMLResponse)
+async def bay_edit_lot(
+    pk: int,
+    lot_id: int,
+    request: Request,
+    dippedAt: str = Form(...),
+    clothMeters: str = Form(...),
+    redoxMv: str = Form(""),
+    workshop: str = Form(""),
+    db: Session = Depends(get_db),
+):
+    user = _need_login(request, db)
+    if not user:
+        return RedirectResponse("/login", status_code=303)
+    item = _load_vat(db, pk)
+    ws = int(workshop) if workshop.strip() else None
+    if not item:
+        return RedirectResponse("/", status_code=303)
+    lot = (
+        db.query(DipLot)
+        .filter(DipLot.id == lot_id, DipLot.vat_id == pk)
+        .first()
     )
+    if lot is None:
+        return RedirectResponse(f"/?vat={pk}" + (f"&workshop={ws}" if ws else ""), status_code=303)
+    try:
+        dt, meters, redox = _parse_lot_fields(dippedAt, clothMeters, redoxMv)
+        # 同一条规则入口：先校验（此时刻本笔尚未被改动，邻笔定位准确），通过后才赋值
+        validate_lot_upsert(item, dt, db, existing_lot=lot)
+        lot.dippedAt = dt
+        lot.clothMeters = meters
+        lot.redoxMv = redox
+        db.commit()
+        return RedirectResponse(f"/?vat={pk}" + (f"&workshop={ws}" if ws else ""), status_code=303)
+    except (ValueError, InvalidOperation) as exc:
+        return _lot_form_failure(request, db, user, pk, ws, f"浸染记录无效：{exc}")
+    except VatRuleError as exc:
+        return _lot_form_failure(request, db, user, pk, ws, exc.message)
+    except IntegrityError:
+        return _lot_form_failure(
+            request,
+            db,
+            user,
+            pk,
+            ws,
+            "该缸已有相同时刻的浸染笔：同缸时刻须严格递增、互不相等，本次改笔已取消。",
+        )
 
 
 # 旧顶栏 CRUD 路径一律回到还原台，避免「换皮表页」残留入口

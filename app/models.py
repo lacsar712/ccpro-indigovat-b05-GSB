@@ -64,6 +64,10 @@ class Vat(Base):
 
 class DipLot(Base):
     __tablename__ = "dip_lots"
+    __table_args__ = (
+        # 同缸浸染时刻唯一：配合业务规则兜底，杜绝连交/并发两笔相同时刻同时入库
+        UniqueConstraint("vat_id", "dippedAt", name="uniq_lot_time_per_vat"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     vat_id: Mapped[int] = mapped_column(ForeignKey("vats.id", ondelete="CASCADE"))
