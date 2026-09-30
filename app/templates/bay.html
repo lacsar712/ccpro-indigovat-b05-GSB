@@ -79,6 +79,7 @@
         <p class="hint">当前 <strong x-text="selected().statusLabel"></strong>
           · 最近浸染 <span x-text="selected().lastDippedAt || '—'"></span>
           · 设为可染色须最新批次电位 ≤ -500 mV</p>
+        <p class="hint">同缸浸染时刻<strong>严格递增</strong>：新时刻须晚于本缸最晚一笔，相同时刻至多一笔；闲置缸拒绝登记；修改旧笔也不得越过相邻两笔。</p>
 
         <div class="panel-grid">
           <div>
@@ -119,7 +120,33 @@
                     <span x-text="l.clothMeters + ' m'"></span>
                     ·
                     <span x-text="l.redoxMv === null ? '无电位' : (l.redoxMv + ' mV')"></span>
+                    <button
+                      type="button"
+                      class="lot-edit-btn"
+                      style="margin-left:0.5rem"
+                      @click.prevent="editingLotId = (editingLotId === l.id ? null : l.id)"
+                      x-text="editingLotId === l.id ? '收起' : '改'"
+                    ></button>
                   </span>
+                  <form
+                    x-show="editingLotId === l.id"
+                    x-cloak
+                    method="post"
+                    :action="'/bay/vats/' + selected().id + '/lots/' + l.id"
+                    style="margin-top:0.5rem"
+                  >
+                    <input type="hidden" name="workshop" :value="filterWs || ''">
+                    <label style="display:block;margin-bottom:0.35rem">浸染时间
+                      <input type="datetime-local" name="dippedAt" required :value="l.dippedAtLocal">
+                    </label>
+                    <label style="display:block;margin-bottom:0.35rem">布料米数
+                      <input type="number" name="clothMeters" step="0.01" min="0.01" required :value="l.clothMeters">
+                    </label>
+                    <label style="display:block;margin-bottom:0.35rem">氧化还原电位 (mV，可空)
+                      <input type="number" name="redoxMv" step="0.01" placeholder="例如 -520" :value="l.redoxMv === null ? '' : l.redoxMv">
+                    </label>
+                    <button type="submit">保存修改</button>
+                  </form>
                 </li>
               </template>
               <li x-show="!selected().recentLots.length" style="border:0;color:#6b7c85">尚无记录</li>
@@ -140,6 +167,7 @@
       vats: {{ vats | tojson }},
       filterWs: {{ filter_workshop if filter_workshop is not none else 'null' }},
       selectedId: {{ selected_vat if selected_vat is not none else 'null' }},
+      editingLotId: null,
       init() {
         const params = new URLSearchParams(window.location.search);
         if (params.has('workshop') && this.filterWs === null) {

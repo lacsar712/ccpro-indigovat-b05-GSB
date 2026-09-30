@@ -39,7 +39,15 @@ docker compose up --build -d
 2. **工坊 chip**：仅作缸位筛选，无独立工坊 CRUD 页
 3. **点缸展开**：同页内登记浸染批次、改状态、看近几笔；无平行「染缸表 / 批次表」
 
-**业务规则**：状态改为 `ready`（可染色）时，最新批次 `redoxMv` 须已填且 ≤ -500（见 `vat_rules.py`）。
+**业务规则**：
+
+1. 状态改为 `ready`（可染色）时，最新批次 `redoxMv` 须已填且 ≤ -500（见 `vat_rules.py`）。
+2. **同缸浸染时刻严格递增**（新建与更新共用 `services/dip_lots.py` 同一套校验）：
+   - 只有「还原中 reducing」「可染色 ready」的缸能登记浸染；**闲置 idle 缸一律拒绝**；
+   - 新建批次的时刻必须**严格晚于**该缸已有最晚一笔，早于或等于都拒绝，因此同缸相同时刻至多一笔入库（另由 `dip_lots (vat_id, dippedAt)` 唯一约束兜底并发）；
+   - 更新旧笔时只能在它的**相邻上一笔与下一笔时刻之间**挪动，相等或跨越都会被拒绝，不得打乱既有递增序；
+   - 表单的无时区时间按 UTC 落库。被拒绝时整笔回滚（不留半截），还原台展开区仍打开并提示原因。
+   - 「严格递增」即 `t1 < t2 < t3 …`，相邻时刻相等（`<=`/`>=`）即判违规。
 
 ## 本地开发（可选）
 
@@ -74,6 +82,7 @@ IndigoVat-01/
     auth.py
     seed.py
     routers/
-    services/vat_rules.py
+    services/vat_rules.py  # 缸状态规则
+    services/dip_lots.py   # 浸染新建/更新共用的时刻严格递增规则
     templates/   # base / bay / login
 ```

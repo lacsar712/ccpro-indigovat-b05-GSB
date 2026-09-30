@@ -12,6 +12,11 @@ from sqlalchemy.orm import Session, joinedload
 from app.auth import get_current_user
 from app.db import get_db
 from app.models import DipLot, Vat, Workshop
+from app.services.dip_lots import (
+    create_dip_lot,
+    sorted_dip_lots,
+    update_dip_lot,
+)
 from app.services.vat_rules import VatRuleError, validate_vat_status_change
 
 router = APIRouter()
@@ -57,10 +62,9 @@ def _spark_points(lots: list[DipLot], width: int = 72, height: int = 28) -> list
 
 
 def _vat_payload(vat: Vat) -> dict:
-    lots = sorted(vat.lots, key=lambda x: (x.dippedAt, x.id))
-    chronological = lots
-    latest = lots[-1] if lots else None
-    recent = list(reversed(lots[-8:]))  # 展开区展示近几笔
+    chronological = sorted_dip_lots(vat.lots)
+    latest = chronological[-1] if chronological else None
+    recent = list(reversed(chronological[-8:]))  # 展开区展示近几笔
     return {
         "id": vat.id,
         "code": vat.code,
@@ -78,6 +82,7 @@ def _vat_payload(vat: Vat) -> dict:
             {
                 "id": l.id,
                 "dippedAt": l.dippedAt.strftime("%Y-%m-%d %H:%M"),
+                "dippedAtLocal": l.dippedAt.strftime("%Y-%m-%dT%H:%M"),
                 "clothMeters": float(l.clothMeters),
                 "redoxMv": float(l.redoxMv) if l.redoxMv is not None else None,
             }
@@ -166,6 +171,15 @@ async def bay_vat_status(
     )
 
 
+def _parse_lot_fields(dippedAt: str, clothMeters: str, redoxMv: str):
+    """解析浸染表单字段；ValueError/InvalidOperation 由调用方统一回滚渲染。"""
+    return (
+        datetime.fromisoformat(dippedAt),
+        Decimal(clothMeters),
+        Decimal(redoxMv) if redoxMv.strip() else None,
+    )
+
+
 @router.post("/bay/vats/{pk}/lots", response_class=HTMLResponse)
 async def bay_log_lot(
     pk: int,
@@ -185,17 +199,59 @@ async def bay_log_lot(
         return RedirectResponse("/", status_code=303)
     error = None
     try:
-        lot = DipLot(
-            vat_id=pk,
-            dippedAt=datetime.fromisoformat(dippedAt),
-            clothMeters=Decimal(clothMeters),
-            redoxMv=Decimal(redoxMv) if redoxMv.strip() else None,
-        )
-        db.add(lot)
+        when, meters, redox = _parse_lot_fields(dippedAt, clothMeters, redoxMv)
+        # 新建与更新共用 services.dip_lots 的同一套时刻规则
+        create_dip_lot(db, item, when, meters, redox)
         db.commit()
         return RedirectResponse(f"/?vat={pk}" + (f"&workshop={ws}" if ws else ""), status_code=303)
     except (ValueError, InvalidOperation) as exc:
         error = f"浸染记录无效：{exc}"
+        db.rollback()
+    except VatRuleError as exc:
+        error = exc.message
+        db.rollback()
+    return render(
+        request,
+        "bay.html",
+        _bay_context(request, db, user, ws, pk, error),
+        status_code=400,
+    )
+
+
+@router.post("/bay/vats/{pk}/lots/{lot_pk}", response_class=HTMLResponse)
+async def bay_update_lot(
+    pk: int,
+    lot_pk: int,
+    request: Request,
+    dippedAt: str = Form(...),
+    clothMeters: str = Form(...),
+    redoxMv: str = Form(""),
+    workshop: str = Form(""),
+    db: Session = Depends(get_db),
+):
+    user = _need_login(request, db)
+    if not user:
+        return RedirectResponse("/login", status_code=303)
+    item = db.get(Vat, pk)
+    ws = int(workshop) if workshop.strip() else None
+    if not item:
+        return RedirectResponse("/", status_code=303)
+    # 批次必须归属本缸，防跨缸越序
+    lot = db.get(DipLot, lot_pk)
+    if not lot or lot.vat_id != pk:
+        return RedirectResponse(f"/?vat={pk}", status_code=303)
+    error = None
+    try:
+        when, meters, redox = _parse_lot_fields(dippedAt, clothMeters, redoxMv)
+        # 与新建走同一规则函数：闲置拒绝、严格递增、更新不得越序
+        update_dip_lot(db, item, lot, when, meters, redox)
+        db.commit()
+        return RedirectResponse(f"/?vat={pk}" + (f"&workshop={ws}" if ws else ""), status_code=303)
+    except (ValueError, InvalidOperation) as exc:
+        error = f"浸染记录无效：{exc}"
+        db.rollback()
+    except VatRuleError as exc:
+        error = exc.message
         db.rollback()
     return render(
         request,

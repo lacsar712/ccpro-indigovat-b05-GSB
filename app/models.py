@@ -64,6 +64,9 @@ class Vat(Base):
 
 class DipLot(Base):
     __tablename__ = "dip_lots"
+    __table_args__ = (
+        UniqueConstraint("vat_id", "dippedAt", name="uniq_dip_time_per_vat"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     vat_id: Mapped[int] = mapped_column(ForeignKey("vats.id", ondelete="CASCADE"))
